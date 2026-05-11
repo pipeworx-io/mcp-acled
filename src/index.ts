@@ -36,7 +36,7 @@ interface McpToolExport {
  */
 
 
-const READ_URL = 'https://api.acleddata.com/acled/read';
+const READ_URL = 'https://acleddata.com/api/acled/read';
 const TOKEN_URL = 'https://acleddata.com/oauth/token';
 
 const tools: McpToolExport['tools'] = [
@@ -193,7 +193,7 @@ function addFilters(params: URLSearchParams, args: Record<string, unknown>) {
 
 async function acledFetch(args: Record<string, unknown>, extraLimit?: number): Promise<EventRow[]> {
   const { email, password } = credentials(args);
-  const params = new URLSearchParams();
+  const params = new URLSearchParams({ _format: 'json' });
   addFilters(params, args);
   const cap = Math.min(5000, Math.max(1, extraLimit ?? (args.limit as number) ?? 100));
   params.set('limit', String(cap));
