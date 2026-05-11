@@ -23,16 +23,21 @@ interface McpToolExport {
  * globally with date, lat/lon, actors, and fatalities. Pairs with GDELT for
  * geopolitical risk: GDELT for narrative sentiment, ACLED for incident counts.
  *
- * Auth: ACLED requires BOTH an API key and the email registered for that key.
- * - Platform: gateway injects _apiKey (from PLATFORM_ACLED_KEY) and _email
- *   (from PLATFORM_ACLED_EMAIL) per request.
- * - BYO: pass ?_apiKey=...&_email=... on the gateway URL.
+ * Auth: ACLED migrated to OAuth in 2025. You exchange your myACLED email +
+ * password for a short-lived access_token via /oauth/token. The token is
+ * cached in worker memory (24h TTL, refreshed on 401) so most requests reuse
+ * a single login.
  *
- * Register at https://developer.acleddata.com
+ * - Platform: gateway env vars PLATFORM_ACLED_EMAIL + PLATFORM_ACLED_PASSWORD
+ *   are injected as _email / _password per request.
+ * - BYO: pass ?_email=...&_password=... on the gateway URL.
+ *
+ * Register a free myACLED account at https://acleddata.com/register/
  */
 
 
-const BASE_URL = 'https://api.acleddata.com/acled/read';
+const READ_URL = 'https://api.acleddata.com/acled/read';
+const TOKEN_URL = 'https://acleddata.com/oauth/token';
 
 const tools: McpToolExport['tools'] = [
   {
@@ -90,15 +95,73 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
   }
 }
 
-function authParams(args: Record<string, unknown>): URLSearchParams {
-  const apiKey = (args._apiKey as string | undefined)?.trim();
-  const email = (args._email as string | undefined)?.trim();
-  if (!apiKey || !email) {
+// ── OAuth token cache (worker-instance memory) ────────────────────────
+// CF Workers don't share memory across instances, so this caches per-isolate.
+// Acceptable trade-off: ACLED tokens are valid 24h, an isolate handling
+// many requests reuses the token; cold isolates re-auth (one extra round-trip).
+
+interface CachedToken {
+  access_token: string;
+  expires_at: number; // epoch ms
+}
+const TOKEN_CACHE = new Map<string, CachedToken>();
+const TOKEN_TTL_MS = 23 * 60 * 60 * 1000; // 23h safety margin under ACLED's 24h
+
+async function getAccessToken(email: string, password: string): Promise<string> {
+  const cached = TOKEN_CACHE.get(email);
+  if (cached && cached.expires_at > Date.now()) return cached.access_token;
+
+  const body = new URLSearchParams({
+    username: email,
+    password,
+    grant_type: 'password',
+    client_id: 'acled',
+  });
+
+  const res = await fetch(TOKEN_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Accept: 'application/json',
+    },
+    body: body.toString(),
+  });
+
+  if (res.status === 401 || res.status === 400) {
+    const txt = await res.text();
     throw new Error(
-      'ACLED requires both an API key and the registered email. Pass ?_apiKey=...&_email=... on the gateway URL, or contact the operator to configure platform credentials. Register: https://developer.acleddata.com',
+      `ACLED OAuth: invalid credentials (HTTP ${res.status}). ${txt.slice(0, 200)} — register at https://acleddata.com/register/`,
     );
   }
-  return new URLSearchParams({ key: apiKey, email });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`ACLED OAuth error: ${res.status} ${txt.slice(0, 200)}`);
+  }
+
+  const data = (await res.json()) as { access_token?: string; expires_in?: number };
+  if (!data.access_token) {
+    throw new Error('ACLED OAuth: response missing access_token');
+  }
+  const ttlMs = (data.expires_in ?? 86400) * 1000;
+  TOKEN_CACHE.set(email, {
+    access_token: data.access_token,
+    expires_at: Date.now() + Math.min(ttlMs, TOKEN_TTL_MS),
+  });
+  return data.access_token;
+}
+
+function credentials(args: Record<string, unknown>): { email: string; password: string } {
+  const email = (args._email as string | undefined)?.trim();
+  // Accept _password (preferred) or legacy _apiKey (for forward-compat with the
+  // old key+email pattern, in case anyone still has BYO URLs from 0.1.0).
+  const password =
+    (args._password as string | undefined)?.trim() ?? (args._apiKey as string | undefined)?.trim();
+  if (!email || !password) {
+    throw new Error(
+      'ACLED requires myACLED email + password. Pass ?_email=...&_password=... on the gateway URL, or contact the operator to configure platform credentials. Register: https://acleddata.com/register/',
+    );
+  }
+  return { email, password };
 }
 
 function addFilters(params: URLSearchParams, args: Record<string, unknown>) {
@@ -107,7 +170,6 @@ function addFilters(params: URLSearchParams, args: Record<string, unknown>) {
   if (args.event_type) params.set('event_type', String(args.event_type));
   if (args.sub_event_type) params.set('sub_event_type', String(args.sub_event_type));
   if (args.actor) {
-    // ACLED supports actor1 / actor2 separately; using "any" wildcard for either
     params.set('actor1', String(args.actor));
     params.set('actor1_where', 'LIKE');
   }
@@ -130,12 +192,26 @@ function addFilters(params: URLSearchParams, args: Record<string, unknown>) {
 }
 
 async function acledFetch(args: Record<string, unknown>, extraLimit?: number): Promise<EventRow[]> {
-  const params = authParams(args);
+  const { email, password } = credentials(args);
+  const params = new URLSearchParams();
   addFilters(params, args);
   const cap = Math.min(5000, Math.max(1, extraLimit ?? (args.limit as number) ?? 100));
   params.set('limit', String(cap));
 
-  const res = await fetch(`${BASE_URL}?${params}`);
+  // Try with cached token first; on 401, refresh and retry once.
+  let token = await getAccessToken(email, password);
+  let res = await fetch(`${READ_URL}?${params}`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+  });
+
+  if (res.status === 401) {
+    TOKEN_CACHE.delete(email);
+    token = await getAccessToken(email, password);
+    res = await fetch(`${READ_URL}?${params}`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+    });
+  }
+
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`ACLED error: ${res.status} ${body.slice(0, 200)}`);
