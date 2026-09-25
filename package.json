@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-acled",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "ACLED MCP — Armed Conflict Location & Event Data Project",
   "type": "module",
   "main": "src/index.ts",
@@ -26,7 +26,7 @@
     "@cloudflare/workers-types": "^4.20260405.1"
   },
   "pipeworx": {
-    "sourceHash": "v1-05bede765576a5d73ce8525bf143cdef35c7fd8f40b1d37bdc350c061c2bcdbc",
-    "sourceCommit": "60f04b68c347e970c6be94a53439d1364061fc06"
+    "sourceHash": "v1-c509dd764d22519005be03ded4ef48debee4caffaa489bb5f458f0ff5a6e2fc6",
+    "sourceCommit": "dca20ba6e13a9aa1c9f2918fc2ddaffe4cc30e5c"
   }
 }
