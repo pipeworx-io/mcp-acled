@@ -10,7 +10,7 @@ import pack from './index.js';
 
 
 const server = new Server(
-  { name: '@pipeworx/mcp-acled', version: '0.2.4' },
+  { name: '@pipeworx/mcp-acled', version: '0.2.5' },
   { capabilities: { tools: {} } },
 );
 
